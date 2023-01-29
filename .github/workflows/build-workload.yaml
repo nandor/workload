@@ -1,0 +1,68 @@
+name: Build CI image
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-image:
+    name: Build and push Docker image for CI
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nandor/riscv-llvm-image:v0.0.5
+    steps:
+      - name: Install Python dependencies
+        run: |
+          pip install humanfriendly doit GitPython psutil
+
+      - name: Get the image repository
+        uses: actions/checkout@v3
+        with:
+          repository: firesim/FireMarshal
+          ref: master
+          path: FireMarshal
+          fetch-depth: 1
+          submodules: false
+
+      - name: Checkout Scala FireSim
+        uses: actions/checkout@v3.2.0
+        with:
+          repository: firesim/firesim
+          ref: main
+          path: firesim
+          fetch-depth: 1
+          submodules: false
+
+      - name: Initialize submodules
+        run: |
+          cd FireMarshal
+          git submodule update --init --depth 1 boards/default/linux
+          git submodule update --init --depth 1 boards/default/firmware/riscv-pk
+          git submodule update --init --depth 1 boards/default/firmware/opensbi
+          git submodule update --init --depth 1 wlutil/busybox
+          git submodule update --init --depth 1 boards/default/distros/br/buildroot
+          git submodule update --init --depth 1 boards/firechip/drivers/*
+
+      - name: Run FireMarshal
+        run: |
+          cd FireMarshal
+          ./marshal -v build br-base.json
+          echo "BASE_IMAGE=images/br-base/br-base.img" >> $GITHUB_ENV
+          echo "BASE_LINUX=images/br-base/br-base-bin" >> $GITHUB_ENV
+
+      - name: Package Linux image
+        run: |
+          mkdir -p /tmp/overlay
+
+          cp /firesim/deploy/workloads/linux-poweroff.json /tmp/overlay/linux-poweroff.json
+
+          cd firesim/sw/check-rtc
+          make print-mcycle-linux
+          cp print-mcycle-linux /tmp/overlay/print-mcycle-linux
+          python3 gen-benchmark-rootfs.py -w linux-poweroff.json -r -b $BASE_IMAGE -s /tmp/overlay
+
+          mkdir -p /tmp/images
+          cp /tmp/overlay/linux-poweroff/poweroffnode.ext2 /tmp/images/poweroffnode.ext2
+
+          cd /tmp
+          tar cvf images.tar images
