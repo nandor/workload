@@ -1,0 +1,33 @@
+name: 'Build and Cache'
+description: 'Builds & caches artefacts'
+inputs:
+  key:
+    description: 'A key to identify the version of the artefact'
+    required: true
+  path:
+    description: 'A list of files to cache and restore'
+    required: true
+  run:
+    description: 'A command to execute to build the project'
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Try to restore from cache
+      id: cache
+      uses: martijnhols/actions-cache/restore@v3.0.11b
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
+
+    - name: Rebuild LLVM
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: ${{ inputs.run }}
+
+    - name: Upload LLVM to cache
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: martijnhols/actions-cache/save@v3.0.11b
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}

@@ -1,22 +1,35 @@
 name: Build CI image
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+    - '*'
 
 jobs:
   build-image:
-    name: Build and push Docker image for CI
+    name: Build and Package FireSim Linux images
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
     container:
       image: ghcr.io/nandor/riscv-llvm-image:v0.0.5
+      options: --privileged
+
     steps:
       - name: Install Python dependencies
         run: |
           pip install humanfriendly doit GitPython psutil
 
-      - name: Get the image repository
-        uses: actions/checkout@v3
+      - name: Checkout the repository
+        uses: actions/checkout@v3.2.0
+        with:
+          fetch-depth: 2
+          submodules: recursive
+
+      - name: Get the FireSim repository
+        uses: actions/checkout@v3.2.0
         with:
           repository: firesim/FireMarshal
           ref: master
@@ -24,7 +37,7 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      - name: Checkout Scala FireSim
+      - name: Get the FireSim repository
         uses: actions/checkout@v3.2.0
         with:
           repository: firesim/firesim
@@ -33,36 +46,62 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      - name: Initialize submodules
+      - name: Configure environment
+        id: env
         run: |
-          cd FireMarshal
-          git submodule update --init --depth 1 boards/default/linux
-          git submodule update --init --depth 1 boards/default/firmware/riscv-pk
-          git submodule update --init --depth 1 boards/default/firmware/opensbi
-          git submodule update --init --depth 1 wlutil/busybox
-          git submodule update --init --depth 1 boards/default/distros/br/buildroot
-          git submodule update --init --depth 1 boards/firechip/drivers/*
+          echo "FireMarshal-hash=$(cd FireMarshal && git rev-parse @) >> $GITHUB_OUTPUT"
 
-      - name: Run FireMarshal
+      - name: Build & cache Linux image
+        uses: ./.github/actions/build-and-cache
+        with:
+          key: ${{ runner.os }}-${{ steps.env.outputs.FireMarshal-hash }}
+          path: |
+            FireMarshal/images/br-base/br-base.img
+            FireMarshal/images/br-base/br-base-bin
+          run: |
+            cd FireMarshal
+            git submodule update --init --depth 1 boards/default/linux
+            git submodule update --init --depth 1 boards/default/firmware/riscv-pk
+            git submodule update --init --depth 1 boards/default/firmware/opensbi
+            git submodule update --init --depth 1 wlutil/busybox
+            git submodule update --init --depth 1 boards/default/distros/br/buildroot
+            git submodule update --init --depth 1 boards/firechip/drivers/*
+            ./marshal -v build br-base.json
+
+      - name: Set up environment
         run: |
-          cd FireMarshal
-          ./marshal -v build br-base.json
-          echo "BASE_IMAGE=images/br-base/br-base.img" >> $GITHUB_ENV
-          echo "BASE_LINUX=images/br-base/br-base-bin" >> $GITHUB_ENV
+          echo "ROOT=$(pwd)" >> $GITHUB_ENV
+          echo "BR_BASE_IMG=$(pwd)/FireMarshal/images/br-base/br-base.img" >> $GITHUB_ENV
+          echo "BR_BASE_BIN=$(pwd)/FireMarshal/images/br-base/br-base-bin" >> $GITHUB_ENV
 
-      - name: Package Linux image
+      - name: Build auxiliary tools
         run: |
-          mkdir -p /tmp/overlay
+          make -C $ROOT/firesim/sw/check-rtc print-mcycle-linux
+          echo "PATH_PRINT_MCYCLE_LINUX=$ROOT/firesim/sw/check-rtc/print-mcycle-linux" >> $GITHUB_ENV
 
-          cp /firesim/deploy/workloads/linux-poweroff.json /tmp/overlay/linux-poweroff.json
+      - name: Package Test - linux-poweroff
+        run: |
+          export BUILD_DIR=/tmp/images/image
+          export OVERLAY_DIR=$BUILD_DIR/overlay
 
-          cd firesim/sw/check-rtc
-          make print-mcycle-linux
-          cp print-mcycle-linux /tmp/overlay/print-mcycle-linux
-          python3 gen-benchmark-rootfs.py -w linux-poweroff.json -r -b $BASE_IMAGE -s /tmp/overlay
+          mkdir -p $OVERLAY_DIR
+          cp $PATH_PRINT_MCYCLE_LINUX $OVERLAY_DIR/print-mcycle-linux
 
-          mkdir -p /tmp/images
-          cp /tmp/overlay/linux-poweroff/poweroffnode.ext2 /tmp/images/poweroffnode.ext2
+          python3 $ROOT/firesim/deploy/workloads/gen-benchmark-rootfs.py \
+            -r \
+            -w $ROOT/firesim/deploy/workloads/linux-poweroff.json \
+            -b $BR_BASE_IMG \
+            -s $OVERLAY_DIR \
+            -o $BUILD_DIR
+          rm -rf $OVERLAY_DIR
 
-          cd /tmp
-          tar cvf images.tar images
+          mv $BUILD_DIR/poweroffnode.ext2 $BUILD_DIR/rootfs.ext2
+          cp $BR_BASE_BIN $BUILD_DIR/bootbin
+
+          cd /tmp/images
+          tar czvf linux-poweroff.tar.gz image
+          rm -rf /tmp/images/image
+
+      - uses: ncipollo/release-action@v1
+        with:
+          artifacts: "/tmp/images/*.tar.gz"
