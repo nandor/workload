@@ -49,12 +49,12 @@ jobs:
       - name: Configure environment
         id: env
         run: |
-          echo "FireMarshal-hash=$(cd FireMarshal && git rev-parse @) >> $GITHUB_OUTPUT"
+          echo "marshal-hash=$(cd FireMarshal && git rev-parse @)" >> $GITHUB_OUTPUT
 
       - name: Build & cache Linux image
         uses: ./.github/actions/build-and-cache
         with:
-          key: ${{ runner.os }}-${{ steps.env.outputs.FireMarshal-hash }}
+          key: ${{ runner.os }}-${{ steps.env.outputs.marshal-hash }}
           path: |
             FireMarshal/images/br-base/br-base.img
             FireMarshal/images/br-base/br-base-bin
@@ -71,35 +71,48 @@ jobs:
       - name: Set up environment
         run: |
           echo "ROOT=$(pwd)" >> $GITHUB_ENV
-          echo "BR_BASE_IMG=$(pwd)/FireMarshal/images/br-base/br-base.img" >> $GITHUB_ENV
-          echo "BR_BASE_BIN=$(pwd)/FireMarshal/images/br-base/br-base-bin" >> $GITHUB_ENV
+          echo "MARSHAL_DIR=$(pwd)/FireMarshal" >> $GITHUB_ENV
 
-      - name: Build auxiliary tools
-        run: |
-          make -C $ROOT/firesim/sw/check-rtc print-mcycle-linux
-          echo "PATH_PRINT_MCYCLE_LINUX=$ROOT/firesim/sw/check-rtc/print-mcycle-linux" >> $GITHUB_ENV
-
-      - name: Package Test - linux-poweroff
+      - name: Package Test - bare
         run: |
           export BUILD_DIR=/tmp/images/image
-          export OVERLAY_DIR=$BUILD_DIR/overlay
+          mkdir -p $BUILD_DIR
 
+          export OVERLAY_DIR=$BUILD_DIR/overlay
           mkdir -p $OVERLAY_DIR
-          cp $PATH_PRINT_MCYCLE_LINUX $OVERLAY_DIR/print-mcycle-linux
+
+          make -C $ROOT/firesim/sw/check-rtc print-mcycle-linux
+          cp $ROOT/firesim/sw/check-rtc/print-mcycle-linux $OVERLAY_DIR/print-mcycle-linux
 
           python3 $ROOT/firesim/deploy/workloads/gen-benchmark-rootfs.py \
             -r \
             -w $ROOT/firesim/deploy/workloads/linux-poweroff.json \
-            -b $BR_BASE_IMG \
+            -b $MARSHAL_DIR/images/br-base/br-base.img \
             -s $OVERLAY_DIR \
             -o $BUILD_DIR
           rm -rf $OVERLAY_DIR
 
-          mv $BUILD_DIR/poweroffnode.ext2 $BUILD_DIR/rootfs.ext2
-          cp $BR_BASE_BIN $BUILD_DIR/bootbin
+          mv $BUILD_DIR/poweroffnode.ext2 $BUILD_DIR/blkdev0.ext2
+          cp $MARSHAL_DIR/images/br-base/br-base-bin $BUILD_DIR/bootbin
 
           cd /tmp/images
           tar czvf linux-poweroff.tar.gz image
+          rm -rf /tmp/images/image
+
+      - name: Package Test - bare
+        run: |
+          # Build the test.
+          cd FireMarshal
+          ./marshal -v build test/bare.yaml
+          cd ..
+
+          export BUILD_DIR=/tmp/images/image
+          mkdir -p $BUILD_DIR
+
+          cp $MARSHAL_DIR/test/bare/hello $BUILD_DIR/bootbin
+
+          cd /tmp/images
+          tar czvf bare.tar.gz image
           rm -rf /tmp/images/image
 
       - uses: ncipollo/release-action@v1
